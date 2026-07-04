@@ -1,0 +1,161 @@
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_google_genai import (
+    GoogleGenerativeAIEmbeddings,
+    ChatGoogleGenerativeAI
+)
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from dotenv import load_dotenv
+import os
+import tempfile
+
+load_dotenv()
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+st.set_page_config(page_title="HR Policy Assistant", page_icon="📄")
+
+st.title("📄 HR Policy Assistant")
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+uploaded_file = st.file_uploader(
+    "Upload your HR Policy PDF",
+    type=["pdf"]
+)
+
+if uploaded_file is not None:
+
+    # Save uploaded PDF temporarily
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        tmp_file.write(uploaded_file.read())
+        pdf_path = tmp_file.name
+
+    # Load PDF
+    loader = PyPDFLoader(pdf_path)
+    documents = loader.load()
+
+    st.success("PDF Loaded Successfully!")
+
+    st.write(f"Total Pages: {len(documents)}")
+
+    # Split into chunks
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200
+    )
+
+    chunks = text_splitter.split_documents(documents)
+
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="gemini-embedding-001",
+        google_api_key=GOOGLE_API_KEY
+    )
+
+    vector_store = FAISS.from_documents(
+        chunks,
+        embeddings
+    )
+
+    retriever = vector_store.as_retriever(
+        search_type="mmr",
+        search_kwargs={
+            "k": 4,
+            "fetch_k": 8
+        }
+    )
+
+    st.success("Embeddings created successfully!")
+
+    st.success(f"Created {len(chunks)} chunks")
+
+    question = st.chat_input("Ask a question about the HR Policy")
+
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        google_api_key=GOOGLE_API_KEY,
+        temperature=0
+    )
+
+    if question:
+        
+        st.session_state.messages.append(
+            {
+                "role": "user",
+                "content": question
+                
+            }
+        )
+        
+        
+        docs_and_scores = vector_store.similarity_search_with_score(
+            question,
+            k=4
+        )
+        
+        docs = [doc for doc, score in docs_and_scores]
+
+        best_score = docs_and_scores[0][1]
+
+        if best_score > 1.2:
+            st.subheader("Answer")
+            st.write("The information is not available in the uploaded HR Policy.")
+            st.stop()
+
+        context = "\n\n".join([doc.page_content for doc in docs])
+
+
+        prompt = f"""
+    
+You are an HR Policy Assistant.
+    
+Answer the user's question only from the context below.
+    
+If the answer is not present in the context, reply:
+    
+"The information is not available in the uploaded HR Policy."
+    
+Context:
+{context}
+    
+Question:
+{question}
+"""
+
+        with st.spinner("Searching the HR Policy..."):
+
+            response = llm.invoke(prompt)
+
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": response.content
+            }
+        )
+
+        with st.chat_message("assistant"):
+            st.markdown(response.content)
+
+        with st.expander("📄 Sources Used"):
+            
+            pages = sorted(
+                
+                list(
+                    set(
+                        [
+                            doc.metadata.get("page", 0) + 1
+                            for doc in docs
+                            
+                        ]
+                    )
+                )
+            )
+            
+            for page in pages:
+                st.markdown(f"- **Page {page}**")
